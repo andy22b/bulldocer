@@ -217,9 +217,10 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
                     etr.stats.sac['cmpaz'] = 90.
                     ntr.stats.sac['cmpaz'] = 0.
 
-                except:
-                    # TODO sort out non-specific expections
+                except Exception as error:
+                    # TODO sort out non-specific exceptions
                     print('Problem rotating', nid, eid)
+                    print(type(error).__name__ + ': ' + str(error))
                     print('Removing traces...')
                     problem_ids.append(nid)
                     problem_ids.append(eid)
@@ -257,8 +258,9 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
                 tr.simulate(paz_remove=oldpaz, paz_simulate=newpaz,
                             simulate_sensitivity=False)
 
-            except:
+            except Exception as error:
                 print("Problem attaching PZ file for", tr.id)
+                print(type(error).__name__ + ': ' + str(error))
                 problem_ids.append(tr.id)
 
     ###########################################################################
@@ -328,11 +330,14 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
                                 '_wwlpbn', format='SAC')
                 cut_tr.write(mt5path + bbfilename +
                              '_wwlpbn_cut', format='SAC')
-            except:
+            except Exception as error:
                 print('Failed to write SAC file for', trid)
+                print(type(error).__name__ + ': ' + str(error))
 
     # Write ${evname}.txt for use with the rest of readme-Brian
     datejul(year, month, day, hour, minute, second, evlo, evla, depth, mag)
+
+
 # To run as a script without running a python interpreter first
 if __name__ == "__main__":
     import sys
