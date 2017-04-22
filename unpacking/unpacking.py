@@ -1,3 +1,6 @@
+"""
+Module to facilitate unpacking data for use in MT5.
+"""
 ###############################################################################
 # Import modules
 ###############################################################################
@@ -11,12 +14,72 @@ from datetime import datetime
 from obspy import core
 from obspy.geodetics.base import gps2dist_azimuth, kilometer2degrees
 from obspy.io.sac import attach_paz
-from obspy.signal.rotate import rotate2zne
+from obspy.signal.rotate import rotate2zne, rotate_ne_rt
 from obspy.taup import TauPyModel
 
-from unpacking_lib import datejul, get_otherid, getstats
+
+# Helper functions
+def get_otherid(trace):
+    """
+    Function to find corresponding seismogram in E,N pair.
+    Takes trace as argument, returns obspy format id.
+    """
+    network, station, location, channel = getstats(trace)
+    if any(x in channel for x in ['E', '2', 'N', '1']):
+        if 'E' in channel:
+            nor2 = 'N'
+        elif '2' in channel:
+            nor2 = '1'
+        elif 'N' in channel:
+            nor2 = 'E'
+        else:
+            nor2 = '2'
+        otherid = '{}.{}.{}.{}{}'.format(network, station, location,
+                                         channel[:-1], nor2)
+        return otherid
+    else:
+        print('ERROR: Trace appears to be neither an east or north component')
+        print('Trace ID:', trace.id)
+        return 0
 
 
+def getstats(trace: object) -> object:
+    """
+    Shorthand for getting network, station, location and channel info from a
+    trace. Takes trace as argument, returns network, station, location
+    and channel.
+    """
+    network = trace.stats.network
+    station = trace.stats.station
+    location = trace.stats.location
+    channel = trace.stats.channel
+
+    return network, station, location, channel
+
+
+def datejul(year, month, day, hour, minute, second, evla, evlo, depth, mag):
+    """
+    Function to write out a file in the format ${evname}.txt, since this is
+    still used in the later parts of readme-BRIAN. Will attempt to phase out
+    as soon as possible.
+    """
+    # Make python dt object
+    evdt = datetime(year, month, day, hour, minute, second)
+    # $evname in mt5 format
+    yyyyjjjhhmmss = datetime.strftime(evdt, '%Y%j%H%M%S')
+    txt_dt = datetime.strftime(evdt, '%Y (%j)  %m %d %H %M %S.0')
+    str_list = list(map(str, [evla, evlo, depth, mag, yyyyjjjhhmmss]))
+    txt_line = txt_dt + '   {}    {}   {}  {} {}'.format(*str_list)
+
+    outfilename = '{}/{}.txt'.format(yyyyjjjhhmmss, yyyyjjjhhmmss)
+    outfileid = open(outfilename, 'w')
+    outfileid.write('          Origin time           Lat      Lon     Dp  Mag')
+    outfileid.write('\n')
+    outfileid.write(txt_line)
+    outfileid.close()
+
+
+# Main function
 def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
               evlo, depth, mag, rot_tol=5., before_cut=30., after_cut=90.):
     """
@@ -52,9 +115,9 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     if os.path.exists(yyyyjjjhhmmss):
         shutil.rmtree(yyyyjjjhhmmss)
     # Extract tar archive (transparent compression)
-    tf = tarfile.open(tar_archive, 'r:*')
-    tf.extractall()
-    tf.close()
+    tf_id = tarfile.open(tar_archive, 'r:*')
+    tf_id.extractall()
+    tf_id.close()
 
     # Rename extracted file to yyyyjjjhhmmss
     notgz = tar_archive.split('.')[0]
@@ -63,11 +126,11 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     ###########################################################################
     # Read in data to memory
     ###########################################################################
-    st = core.read(yyyyjjjhhmmss + '/*.SAC')
+    stream = core.read(yyyyjjjhhmmss + '/*.SAC')
     # Check for multiple seismograms; merge if necessary
-    st.merge()
+    stream.merge()
     # Create dictionary of traces with ids as keys:
-    id_dic = {tr.id: tr for tr in st}
+    id_dic = {tr.id: tr for tr in stream}
     # Create list of trace ids for traces that cause unpacking problems
     problem_ids = []
 
@@ -78,30 +141,39 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     # Calculate gcarc distances for station (necessary for phase arrivals)
     # Create empty dictionary for station attributes
     stations_dic = {}
-    for tr in st:
-        station = tr.stats.station
+    for trace in stream:
+        station = trace.stats.station
         if station not in list(stations_dic.keys()):
             # Set sub-dictionary for individual station
             stations_dic[station] = statdic = {}
             # Station location
-            stla, stlo = tr.stats.sac['stla'], tr.stats.sac['stlo']
-            dist, az, baz = gps2dist_azimuth(stla, stlo, evla, evlo)
+            stla, stlo = trace.stats.sac['stla'], trace.stats.sac['stlo']
+            dist, azimuth, back_az = gps2dist_azimuth(stla, stlo, evla, evlo)
             # dist is in metres; change to degrees
             gcarc = kilometer2degrees(dist / 1000.)
             statdic['gcarc'] = gcarc
-            statdic['az'] = az
-            statdic['baz'] = baz
+            statdic['az'] = azimuth
+            statdic['baz'] = back_az
 
     # Change trace metadata for all traces
-    for tr in st:
-        station = tr.stats.station
+    for trace in stream:
+        station = trace.stats.station
         statdic = stations_dic[station]
-        sacdic = tr.stats.sac
+        sacdic = trace.stats.sac
         for key in list(statdic.keys()):
             sacdic[key] = statdic[key]
         sacdic['evdp'] = depth
         sacdic['evlo'] = evlo
         sacdic['evla'] = evla
+        sacdic['b'] = trace.stats.starttime - evdt_utc
+        sacdic['e'] = trace.stats.endtime - evdt_utc
+        sacdic['o'] = 0.
+        sacdic['nzyear'] = evdt_utc.year
+        sacdic['nzjday'] = evdt_utc.julday
+        sacdic['nzhour'] = evdt_utc.hour
+        sacdic['nzmin'] = evdt_utc.minute
+        sacdic['nzsec'] = evdt_utc.second
+        sacdic['nzmsec'] = int(round(evdt_utc.microsecond / 1000.))
 
     # Calculate arrivals for each station
     model = TauPyModel(model='ak135')
@@ -118,15 +190,15 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
         arrivaldic[station] = model.get_travel_times(depth, gcarc, phase_list)
 
     # Update SAC data with phase arrival times
-    for tr in st:
-        station = tr.stats.station
+    for trace in stream:
+        station = trace.stats.station
         for phase in arrivaldic[station]:
             # Sac pick convention
             sac_arrivalkey = 't' + str(phasedic[phase.name])
             # Name of phase in SAC file denoted by 'k' then pick (e.g. t0)
             sac_arrivalname = 'k' + sac_arrivalkey
-            tr.stats.sac[sac_arrivalkey] = phase.time
-            tr.stats.sac[sac_arrivalname] = phase.name
+            trace.stats.sac[sac_arrivalkey] = phase.time - trace.stats.sac['o']
+            trace.stats.sac[sac_arrivalname] = phase.name
 
     ###########################################################################
     # Eliminate unpaired E-N and missing-PZ seismograms
@@ -138,12 +210,12 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     # List of north files: makes rotation easier
     pairednorth = []
 
-    for tr in st:
-        channel = tr.stats.channel
+    for trace in stream:
+        channel = trace.stats.channel
         if any(x in channel for x in ['E', '2']):
-            eid = tr.id
+            eid = trace.id
             # ID for corresponding north file
-            nid = get_otherid(tr)
+            nid = get_otherid(trace)
             if nid in list(id_dic.keys()):
                 enpairs[eid] = nid
                 enpairs[nid] = eid
@@ -153,12 +225,12 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
                 problem_ids.append(eid)
 
     # Find n files with no corresponding e file
-    for tr in st:
-        channel = tr.stats.channel
+    for trace in stream:
+        channel = trace.stats.channel
         if any(x in channel for x in ['N', '1']):
-            if tr.id not in list(enpairs.keys()):
-                print('No corresponding E file for', tr.id)
-                problem_ids.append(tr.id)
+            if trace.id not in list(enpairs.keys()):
+                print('No corresponding E file for', trace.id)
+                problem_ids.append(trace.id)
 
     """
     Check for existence of PZ files for each SAC file.
@@ -171,17 +243,17 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     # List of PZ files
     pz_ls = glob.glob(yyyyjjjhhmmss + '/SACPZ*')
     # Search for trace corresponding to each PZ file
-    for pz in pz_ls:
-        pz_split = pz.split('.')
+    for pole_zero in pz_ls:
+        pz_split = pole_zero.split('.')
         # Separate parts of id
-        nw, station, loc, channel = pz_split[1:5]
+        netw, station, loc, channel = pz_split[1:5]
         if loc[0].isdigit():
             locstr = loc
         else:
             locstr = ''
-        pz_trid = '{}.{}.{}.{}'.format(nw, station, locstr, channel)
+        pz_trid = '{}.{}.{}.{}'.format(netw, station, locstr, channel)
         if pz_trid in id_dic and pz_trid not in problem_ids:
-            pz_ids[pz_trid] = pz
+            pz_ids[pz_trid] = pole_zero
     # Look for traces without PZ files:
     for trid in list(id_dic.keys()):
         if trid not in pz_ids:
@@ -212,13 +284,13 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
                 try:
                     znew, nnew, enew = rotate2zne(zdata, 0., -90., ndata, naz,
                                                   0., edata, eaz, 0.)
+                    del znew
                     ntr.data[:] = nnew[:]
                     etr.data[:] = enew[:]
                     etr.stats.sac['cmpaz'] = 90.
                     ntr.stats.sac['cmpaz'] = 0.
 
                 except Exception as error:
-                    # TODO sort out non-specific exceptions
                     print('Problem rotating', nid, eid)
                     print(type(error).__name__ + ': ' + str(error))
                     print('Removing traces...')
@@ -234,7 +306,7 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     # Apply wwlpbn response #################################################
     ###########################################################################
     # Copy stream to leave original broadband alone
-    wwlpbn_st = st.copy()
+    wwlpbn_st = stream.copy()
     wwlpbn_ids = {tr.id: tr for tr in wwlpbn_st}
     # Set response for wwlpbn
     newpaz = {'poles': [-0.257 + 0.3376j, -0.257 - 0.3376j,
@@ -242,26 +314,26 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
               'zeros': [0.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
               'gain': 0.5985275}
 
-    for tr in wwlpbn_st:
+    for trace in wwlpbn_st:
         # Check I want to actually filter it:
-        if tr.id not in problem_ids:
+        if trace.id not in problem_ids:
             # Find corresponding PZ:
-            pz = pz_ids[tr.id]
+            pole_zero = pz_ids[trace.id]
             # Read in polezero from file
             try:
-                attach_paz(tr, pz)
-                oldpaz = tr.stats.paz
+                attach_paz(trace, pole_zero)
+                oldpaz = trace.stats.paz
                 # Decimate by factor 20
-                tr.decimate(5)
-                tr.decimate(4)
+                trace.decimate(5)
+                trace.decimate(4)
                 # Replace existing (pz) filter with wwlpbn
-                tr.simulate(paz_remove=oldpaz, paz_simulate=newpaz,
-                            simulate_sensitivity=False)
+                trace.simulate(paz_remove=oldpaz, paz_simulate=newpaz,
+                               simulate_sensitivity=False)
 
             except Exception as error:
-                print("Problem attaching PZ file for", tr.id)
+                print("Problem attaching PZ file for", trace.id)
                 print(type(error).__name__ + ': ' + str(error))
-                problem_ids.append(tr.id)
+                problem_ids.append(trace.id)
 
     ###########################################################################
     # Cut seismograms for MT5 ###############################################
@@ -270,28 +342,25 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     wwlpbn_cut_st = wwlpbn_st.copy()
     cut_ids = {tr.id: tr for tr in wwlpbn_cut_st}
 
-    for tr in wwlpbn_cut_st:
+    for trace in wwlpbn_cut_st:
         # Check I want to use it:
-        if tr.id not in problem_ids:
+        if trace.id not in problem_ids:
             # If BHZ file, find P arrival
-            if 'Z' in tr.stats.channel[-1]:
-                cut_pick = tr.stats.sac['t0']
-            elif any(x in tr.stats.channel for x in ['E', '2', 'N', '1']):
-                cut_pick = tr.stats.sac['t1']
+            if 'Z' in trace.stats.channel[-1]:
+                cut_pick = trace.stats.sac['t0']
+            elif any(x in trace.stats.channel for x in ['E', '2', 'N', '1']):
+                cut_pick = trace.stats.sac['t1']
 
             else:
-                print(tr.id, 'does not seem to be any of E, N, Z')
-                problem_ids.append(tr.id)
+                print(trace.id, 'does not seem to be any of E, N, Z')
+                problem_ids.append(trace.id)
                 cut_pick = 0.
 
             cut_pick_time = evdt_utc + cut_pick
             cutstart = cut_pick_time - before_cut
             cutend = cut_pick_time + after_cut
-            tr.trim(cutstart, cutend)
-            tr.stats.sac['b'] = tr.stats.starttime - evdt_utc
-            tr.stats.sac['e'] = tr.stats.endtime - evdt_utc
-            tr.stats.sac['o'] = 0.
-            tr.stats.starttime = evdt_utc + tr.stats.sac['b']
+            trace.trim(cutstart, cutend)
+
     ###########################################################################
     # Write seismograms to MT5 file structure
     ###########################################################################
@@ -338,20 +407,71 @@ def unpack_eq(tar_archive, year, month, day, hour, minute, second, evla,
     datejul(year, month, day, hour, minute, second, evlo, evla, depth, mag)
 
 
+def write_inv(p_stations, s_stations, year, month, day, hour, minute,
+              second, evla, evlo, depth, inv_name=None):
+    """
+    Function to read in sac files and format those from selected stations into 
+    :param p_stations: File with list of P-wave stations to use
+    :param s_stations: File with list of S-wave stations to use
+    :param year: 
+    :param month: 
+    :param day: 
+    :param hour: 
+    :param minute: 
+    :param second: 
+    :param evla: in degrees
+    :param evlo: degrees
+    :param depth: km
+    :param inv_name: Non-standard (YYMMDD) name for .inv file
+    :return: 
+    """
+    # Turn date-time info into name of file
+    evdt = datetime(year, month, day, hour, minute, second)
+    yyyyjjjhhmmss = datetime.strftime(evdt, '%Y%j%H%M%S')
+    # Name of directory with filtered and cut sac files
+    mt5_dir = yyyyjjjhhmmss + yyyyjjjhhmmss + '_mt5'
+    # Check directory exists and read in files using obspy
+    if os.path.exists(mt5_dir):
+        stream = core.read(mt5_dir+'*wwlpbn_cut')
+    else:
+        raise IOError('Subdirectory {} does not exist in this folder'.
+                      format(mt5_dir))
+
+    # Name and open .inv file
+    if inv_name:
+        inv_file_name = inv_name
+    else:
+        yymmdd = evdt.strftime('%y%m%d')
+        inv_file_name = yymmdd + 'A.INV'
+    inv_id = open(inv_file_name, 'w')
+
+    # Write header line of INV file, unimportant except when printing summary
+    header_date = evdt.strftime('%y%m%d%H%M%S') + '0'
+
+    header_lon_round = round(evlo,2)
+    header_lon_str = ('{:2d}'.format(int(header_lon_round)) +
+                      str(header_lon_round).split('.')[-2:])
+    header_lat_round = round(evla, 2)
+    header_lat_str = ('{:2d}'.format(int(header_lat_round)) +
+                      str(header_lat_round).split('.')[-2:])
+
+    file_header_str = '{} {}'
+
+
 # To run as a script without running a python interpreter first
 if __name__ == "__main__":
     import sys
 
-    args = sys.argv[:]
-    if len(args) != 12:
+    ARGS = sys.argv[:]
+    if len(ARGS) != 12:
         raise IOError("Wrong number of arguments: 11 arguments"
                       " (tar_archive, year, month, day, hour,"
                       "minute, second, evla, evlo, depth, mag)"
                       " should be specified!")
 
     else:
-        tar_arch = args[1]
-        yr, months, days, hours, minutes, seconds = list(map(int, args[2:8]))
-        evlon, evlat, evdepth, magnitude = list(map(float, args[8:]))
-        unpack_eq(tar_arch, yr, months, days, hours, minutes, seconds, evlon,
-                  evlat, evdepth, magnitude, rot_tol=5.)
+        TAR_ARCH = ARGS[1]
+        YR, MONTHS, DAYS, HOURS, MINUTES, SECONDS = list(map(int, ARGS[2:8]))
+        EVLON, EVLAT, EVDEPTH, MAGNITUDE = list(map(float, ARGS[8:]))
+        unpack_eq(TAR_ARCH, YR, MONTHS, DAYS, HOURS, MINUTES, SECONDS, EVLON,
+                  EVLAT, EVDEPTH, MAGNITUDE, rot_tol=5.)
