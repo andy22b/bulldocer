@@ -4,13 +4,14 @@ Module to facilitate unpacking data for use in MT5.
 ###############################################################################
 # Import modules
 ###############################################################################
-# Seismology-related
+
 import glob
 import os
 import shutil
 import tarfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
+# Seismology-related
 from obspy import core
 from obspy.geodetics.base import gps2dist_azimuth, kilometer2degrees
 from obspy.io.sac import attach_paz
@@ -57,6 +58,139 @@ def getstats(trace: object):
     return network, station, location, channel
 
 
+def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
+    """
+    
+    :param trace:
+    :param pre_arrival_p:
+    :param pre_arrival_s:
+    :param after_arrival:
+    :return: 
+    """
+    # Station name, lower case
+    sname = trace.stats.station.lower()
+    while len(sname) < 4:
+        sname += " "
+    # Phase from channel:
+    channel = trace.stats.channel[-1]
+    assert channel in ['Z', 'T'], "Channel must be vertical or transverse!"
+    if channel is 'Z':
+        channel_num = 1
+    else:
+        channel_num = 2
+
+    # Check that channel is broadband
+    bb = trace.stats.channel[0]
+    if bb is not 'B':
+        print("Channel for station is not broadband: may cause problems...")
+    bb_phase = 4
+
+    # Epicentral distance and azimuth (in degrees)
+    epi_dist = trace.stats.sac['gcarc']
+    assert 0. <= epi_dist <= 90, "Epicentral dist. < 0.0 or > 90.0"
+    azimuth = trace.stats.sac['az']
+    assert 0. <= azimuth <= 360, "Azimuth is not a bearing... Check!"
+
+    # Magnification is always in microns
+    xmag = 1
+
+    # Start of seismogram, secs after evdt (default 10 seconds before arrival):
+    # Find arrival
+    arrival = 0.
+    seis_start = 0.
+    if channel_num == 1:
+        # P is always first arrival
+        arrival = trace.stats.sac['t0']
+        seis_start = round(arrival - pre_arrival_p)
+    else:
+        # S not always second arrival
+        for key in trace.stats.sac:
+            if 'kt' in trace and 'S' in trace.stats.sac[key]:
+                arrival = trace.stats.sac[key[1:]]
+                seis_start = round(arrival - pre_arrival_s)
+    # Check that arrival has been read
+    assert arrival > 0., 'Failed to read arrival for {}'.format(trace.id)
+    # arrival, seconds after start of seismogram
+    arr_secs = arrival - seis_start
+
+    # Weight is always 1:
+    weight = 1.0
+
+    # Delta_t (sampling interval)
+    delta_t = trace.stats.delta
+
+    # Arrival time as integer * delta_t after start of seismogram
+    phase_time = int(round(arr_secs / delta_t))
+
+    # Number of data
+    n_data = int(round(phase_time + after_arrival / delta_t))
+
+    # Max amplitude of trace (converted from SI to microns)
+    ymax = int(round(max(abs(trace.data * 1.e6))))
+
+    # High-pass filtering is alwats zero (for now)
+    hpfilt = 0.
+
+    header_str = ("{}{:1d} {:1d}" + 2 * "{:8.2f}" + "{:8d}{:8.2f}{:5.1f}" +
+                  "{:5d}" * 2 + "{:8d}" + "{:6.2f}" * 3 + "\r\n")
+
+    header = header_str.format(sname[:4], channel_num, bb_phase, epi_dist,
+                               azimuth, xmag, seis_start, weight, phase_time,
+                               n_data, ymax, delta_t, arr_secs, hpfilt)
+
+    return header
+
+
+# def station_polezeros(trace):
+#     """
+#     Helper function to write pole zeros in .inv format.
+#     Checks whether trace has a pz file attachmentotherwise defaults to WWLPBN
+#     :param trace:
+#     :return:
+#     """
+#     if hasattr(trace.stats, 'paz'):
+#         paz = trace.stats.paz
+#         assert all([key in paz.keys() for key in ['poles', 'zeros']])
+#         poles = paz['poles']
+#         zeros = paz['zeros']
+#     else:
+#         print
+
+
+def inv_float(number: float) -> str:
+    """
+    To turn number into format required by .inv file
+    :param number: Float
+    :return: string representation of number in .inv style
+    """
+    float_str = ""
+    if number < 0.:
+        float_str += "-."
+    else:
+        float_str += "0."
+
+    float_exp = "{:.3E}".format(number)
+    decimal = float(float_exp.split('E')[0]) * 0.1
+    dec_string = '{:.4f}'.format(decimal)[-4:]
+    exponent = float_exp.split('E')[-1]
+    if '+' not in exponent:
+        exp_int = int(exponent)
+    else:
+        exp_int = int(exponent[1:])
+    if decimal == 0:
+        new_exponent = 0
+    else:
+        new_exponent = exp_int + 1
+
+    if new_exponent < 0:
+        exp_string = '{:03d}'.format(new_exponent)
+    else:
+        exp_string = '+' + '{:02d}'.format(new_exponent)
+
+    full_string = float_str + dec_string + 'E' + exp_string
+    return full_string
+
+
 class Mt5Eq:
     def __init__(self, name=None, verbose=True):
         """
@@ -67,7 +201,8 @@ class Mt5Eq:
         super(Mt5Eq, self).__init__()
         # Set type of class
         self.dtype = 'Mt5Eq'
-        if verbose:
+        self.verbose = verbose
+        if self.verbose:
             if name:
                 assert type(name) is str, 'Name must be string'
                 self.name = name
@@ -75,13 +210,26 @@ class Mt5Eq:
             else:
                 print("Initializing earthquake class (no name)")
         # Initialize important attributes: latitude, longitude
-
         self.evdt = None
         self.evlo = None
         self.evla = None
         self.depth = None
         self.mag = None
         self.yyyyjjjhhmmss = None
+        # Streams that contain data in different stages of processing
+        self.stream = None
+        self.wwlpbn_st = None
+        self.wwlpbn_cut_st = None
+        self.inv_stream = None
+        # P and S arrival times
+        self.p_arr = {}
+        self.s_arr = {}
+        # Dictionaries for sorting stations by azimuth
+        self.p_azi = None
+        self.s_azi = None
+        # Arrival times at stations for writing to .INV file
+        self.inv_p = None
+        self.inv_s = None
         return
 
     def set_earthquake_info(self, year: int, month: int, day: int, hour: int,
@@ -183,7 +331,7 @@ class Mt5Eq:
         #######################################################################
         # Read in data to memory
         #######################################################################
-        stream = core.read(self.yyyyjjjhhmmss + '/*.SAC')
+        stream = self.stream = core.read(self.yyyyjjjhhmmss + '/*.SAC')
         # Check for multiple seismograms; merge if necessary
         stream.merge()
         # Create dictionary of traces with ids as keys:
@@ -205,8 +353,8 @@ class Mt5Eq:
                 stations_dic[station] = statdic = {}
                 # Station location
                 stla, stlo = trace.stats.sac['stla'], trace.stats.sac['stlo']
-                dist, azimuth, back_az = gps2dist_azimuth(stla, stlo,
-                                                          self.evla, self.evlo)
+                dist, azimuth, back_az = gps2dist_azimuth(self.evla, self.evlo,
+                                                          stla, stlo)
                 # dist is in metres; change to degrees
                 gcarc = kilometer2degrees(dist / 1000.)
                 statdic['gcarc'] = gcarc
@@ -366,7 +514,7 @@ class Mt5Eq:
         # Apply wwlpbn response ###############################################
         #######################################################################
         # Copy stream to leave original broadband alone
-        wwlpbn_st = stream.copy()
+        wwlpbn_st = self.wwlpbn_st = stream.copy()
         wwlpbn_ids = {tr.id: tr for tr in wwlpbn_st}
         # Set response for wwlpbn
         newpaz = {'poles': [-0.257 + 0.3376j, -0.257 - 0.3376j,
@@ -384,8 +532,7 @@ class Mt5Eq:
                     attach_paz(trace, pole_zero)
                     oldpaz = trace.stats.paz
                     # Decimate by factor 20
-                    trace.decimate(5)
-                    trace.decimate(4)
+                    trace.resample(1.0)
                     # Replace existing (pz) filter with wwlpbn
                     trace.simulate(paz_remove=oldpaz, paz_simulate=newpaz,
                                    simulate_sensitivity=False)
@@ -399,7 +546,7 @@ class Mt5Eq:
         # Cut seismograms for MT5 #############################################
         #######################################################################
         # Copy filtered data, so that I can cut it
-        wwlpbn_cut_st = wwlpbn_st.copy()
+        wwlpbn_cut_st = self.wwlpbn_cut_st = wwlpbn_st.copy()
         cut_ids = {tr.id: tr for tr in wwlpbn_cut_st}
 
         for trace in wwlpbn_cut_st:
@@ -425,12 +572,12 @@ class Mt5Eq:
         #######################################################################
         # Rotate horizontal seismograms into transverse #######################
         #######################################################################
-        filtered_ps_st = core.Stream()
+        inv_stream = self.inv_stream = core.Stream()
         for trace in wwlpbn_cut_st:
             # Check I want to use it:
             if trace.id not in problem_ids:
                 if 'Z' in trace.stats.channel[-1]:
-                    filtered_ps_st += trace
+                    inv_stream += trace
                 elif any(x in trace.stats.channel for x in ['E', '1']):
                     trans_trace = trace.copy()
                     n_id = get_otherid(trace)
@@ -442,7 +589,7 @@ class Mt5Eq:
                     trans_trace.data = trans
                     trans_trace.stats.channel = 'BHT'
                     # Find corresponding N trace
-                    filtered_ps_st += trans_trace
+                    inv_stream += trans_trace
 
         #######################################################################
         # Write seismograms to MT5 file structure
@@ -490,21 +637,15 @@ class Mt5Eq:
 
         # Write SAC files for use when making .INV file
 
-        filtered_dic = {trace.id: trace for trace in filtered_ps_st}
-        for trid in filtered_dic.keys():
+        inv_dic = {trace.id: trace for trace in inv_stream}
+        for trid in inv_dic.keys():
             if trid not in problem_ids:
-                trace = filtered_dic[trid]
+                trace = inv_dic[trid]
                 # Read relevant information
                 stats = getstats(trace)
                 # Add time to others for unpacking list into string
                 statlist = list(stats[:])
-                channel = statlist[-1]
                 statlist.insert(0, self.yyyyjjjhhmmss)
-                # Change E-N channels in filenames
-                if channel[-1] == '1':
-                    statlist[-1] = channel[:-1] + 'N'
-                elif channel[-1] == '2':
-                    statlist[-1] = channel[:-1] + 'E'
                 trace_filename = '{}_{}_{}_{}.{}'.format(*statlist)
                 try:
                     trace.write(inv_path + trace_filename, format='SAC')
@@ -517,44 +658,193 @@ class Mt5Eq:
 
     def get_pands_arrivals(self):
         """
-        
         :return: 
         """
+        # Check that
+        assert self.inv_stream, 'Need to unpack or load data'
+        if any((self.p_arr, self.s_arr)):
+            print('P and S arrivals exist:'
+                  'are you sure you want to replace them?')
+            while True:
+                yorn = input('Enter [y] or n:')
+                if yorn.lower() not in ("", "y", "n"):
+                    print('Try again (y, n or ENTER)')
+                    continue
+                else:
+                    break
+
+            if yorn is 'n':
+                raise Exception('Exiting function to avoid overwriting...')
+
+        # Create blank dictionaries to hold arrival times for each trace
+        p_arr = self.p_arr
+        s_arr = self.s_arr
+        for trace in self.inv_stream:
+            channel = trace.stats.channel[-1]
+            sacdic = trace.stats.sac
+            for key in sacdic.keys():
+                if sacdic[key] == 'P' and channel == 'Z':
+                    p_offset = sacdic[key[1:]]
+                    p_time = self.evdt + p_offset
+                    p_arr[trace.id] = p_time
+                elif sacdic[key] == 'S' and channel == 'T':
+                    s_offset = sacdic[key[1:]]
+                    s_time = self.evdt + s_offset
+                    s_arr[trace.id] = s_time
+        self.sort_ps_by_az()
         return
 
-    def write_pands(self, pname=None, sname=None):
+    def sort_ps_by_az(self):
+        assert self.inv_stream, 'Unpack data first.'
+        assert all((self.p_arr, self.s_arr)), 'Calculate P and S arrivals!'
+        # Make dictionaries to contain containing azimuth and stations
+        self.p_azi = {}
+        self.s_azi = {}
+        # Fill dictionaries by looping through inv_stream:
+        for trace in self.inv_stream:
+            # Find whether vertical or horizontal channel
+            channel = trace.stats.channel[-1]
+            if channel == 'Z':
+                self.p_azi[trace.stats.sac['az']] = (trace.id,
+                                                     self.p_arr[trace.id])
+            elif channel == 'T':
+                self.s_azi[trace.stats.sac['az']] = (trace.id,
+                                                     self.s_arr[trace.id])
+        return
+
+    def write_pands(self, pname=None, sname=None, organisation='azimuthal'):
         """
         Function to write files with possible stations that could be included 
         in the .INV file, with predicted P and S arrival times.
         :param pname: 
-        :param sname: 
+        :param sname:
+        :param organisation
         :return: 
         """
         # Check that MT5 object has all the right variables set
-        assert hasattr(self, 'evdt'), 'Make sure date and time are set'
+        assert self.yyyyjjjhhmmss, 'Need to read in earthquake info...'
+        assert all((self.p_arr, self.s_arr)), 'p_arr or s_arr is empty...'
+        org_error = 'organisation must be alphabetical or azimuthal'
+        assert organisation in ['azimuthal', 'alphabetical'], org_error
+        # If P and S filenames not specified, set using default
+        if pname:
+            p_file_name = pname
+        else:
+            p_file_name = '{}/{}_Pstations.txt'.format(self.yyyyjjjhhmmss,
+                                                       self.yyyyjjjhhmmss)
+        if sname:
+            s_file_name = sname
+        else:
+            s_file_name = '{}/{}_Sstations.txt'.format(self.yyyyjjjhhmmss,
+                                                       self.yyyyjjjhhmmss)
+            # Check whether files exist, and whether I want to overwrite them:
+            if os.path.exists(p_file_name):
+                print('P and S arrival files exist:'
+                      'are you sure you want to replace them?')
+                while True:
+                    yorn = input('Enter y or n:')
+                    if yorn.lower() not in ("y", "n"):
+                        print('Try again (enter y or n):')
+                        continue
+                    else:
+                        break
+                if yorn == 'n':
+                    raise Exception('Exiting function to avoid overwriting...')
+        print('Writing P and S arrivals to files:')
+        print(p_file_name, s_file_name)
+
+        # Write arrivals to file
+        # Open P arrivals file
+        p_arr_id = open(p_file_name, 'w')
+        # Open S arrivals file
+        s_arr_id = open(s_file_name, 'w')
+        if organisation == 'azimuthal':
+            for key in sorted(self.p_azi.keys()):
+                station_info = self.p_azi[key]
+                p_arr_id.write('{} {}\n'.format(station_info[0],
+                                                station_info[1].isoformat()))
+            for key in sorted(self.s_azi.keys()):
+                station_info = self.s_azi[key]
+                s_arr_id.write('{} {}\n'.format(station_info[0],
+                                                station_info[1].isoformat()))
+        else:
+            for key in self.p_arr:
+                p_arr_id.write('{} {}\n'.format(key, self.p_arr[key]))
+            for key in self.s_arr:
+                s_arr_id.write('{} {}\n'.format(key, self.s_arr[key]))
+        p_arr_id.close()
+        s_arr_id.close()
+        return
+
+    def read_pands(self, p_file_name, s_file_name):
+        """
+        :param p_file_name: 
+        :param s_file_name:
+        :return: 
+        """
+        # Check whether .inv arrivals exist, and whether to overwrite them.
+        if any((self.inv_s, self.inv_p)):
+            print("P and S arrivals for inversion already exist:"
+                  "are you sure you want to replace them?")
+            while True:
+                yorn = input('Enter y or n:')
+                if yorn.lower() not in ("y", "n"):
+                    print('Try again (enter y or n):')
+                    continue
+                else:
+                    break
+            if yorn == 'n':
+                raise Exception('Exiting function to avoid overwriting...')
+
+        self.inv_s = {}
+        self.inv_p = {}
+
+        if self.verbose:
+            print('Reading data from files...')
+        # Open files, check format
+        p_file_id = open(p_file_name, 'r')
+        p_data = p_file_id.readlines()
+        p_file_id.close()
+
+        s_file_id = open(s_file_name, 'r')
+        s_data = s_file_id.readlines()
+        s_file_id.close()
+
+        # List of file, dictionary pairs to use
+        read_list = [(p_data, self.inv_p), (s_data, self.inv_s)]
+        for data, arrival in read_list:
+            for line in data:
+                lsplit = line.split()
+                assert len(lsplit) == 2, 'Line too long{}'.format(line.strip())
+                try:
+                    trace_id = lsplit[0]
+                    arr_time = datetime.strptime(lsplit[1],
+                                                 '%Y-%m-%dT%H:%M:%S.%f')
+                    arrival[trace_id] = arr_time
+                except Exception as error:
+                    print(error)
+                    print('Problem with line: {}'.format(line.strip()))
+                    print('Please check!')
 
         return
 
-    def write_inv(self, inv_name=None):
+    def write_inv(self, inv_name=None, pre_arr_p=15., pre_arr_s=20.,
+                  after_arr=85.):
         """
         Function to read in sac files and format those from selected stations 
-        into 
-        :param p_stations: File with list of P-wave stations to use
-        :param s_stations: File with list of S-wave stations to use
+        into a .INV format (that MT5 can read).
+         
+        Requires newlines to be specified by \r\n for reading into DOS.
         :param inv_name: Non-standard (YYMMDD) name for .inv file
+        :param pre_arr_p
+        :param pre_arr_s
+        :param after_arr
         :return: 
         """
         # Turn date-time info into name of file
         evdt = self.evdt
-        yyyyjjjhhmmss = datetime.strftime(evdt, '%Y%j%H%M%S')
-        # Name of directory with filtered and cut sac files
-        mt5_dir = yyyyjjjhhmmss + yyyyjjjhhmmss + '_mt5'
-        # Check directory exists and read in files using obspy
-        if os.path.exists(mt5_dir):
-            stream = core.read(mt5_dir+'*wwlpbn_cut')
-        else:
-            raise IOError('Subdirectory {} does not exist in this folder'.
-                          format(mt5_dir))
+        # Check that files exist for reading in
+        assert self.inv_stream, 'Need to unpack or load data'
 
         # Name and open .inv file
         if inv_name:
@@ -569,29 +859,67 @@ class Mt5Eq:
 
         header_lon_round = round(self.evlo, 2)
         header_lon_str = ('{:2d}'.format(int(header_lon_round)) +
-                          str(str(header_lon_round).split('.')[-2:]))
+                          str(header_lon_round).split('.')[-1][:2])
         header_lat_round = round(self.evla, 2)
         header_lat_str = ('{:2d}'.format(int(header_lat_round)) +
-                          str(str(header_lat_round).split('.')[-2:]))
+                          str(header_lat_round).split('.')[-1][:2])
 
-        file_header_str = '{} {}'.format(header_lon_str, header_lat_str)
+        file_head_str = '{} {}  {}{:3d} 0  0\r\n'.format(header_date,
+                                                         header_lat_str,
+                                                         header_lon_str,
+                                                         int(round(self.depth)))
+        inv_id.write(file_head_str)
+        # Create dictionary of traces in inv_stream
+        inv_dic = {trace.id: trace for trace in self.inv_stream}
+
+        # Loop through P stations, writing to file
+        # Write header line with station info
+        for trid in list(self.inv_p.keys()):
+            trace = inv_dic[trid]
+            # Cut trace to correct length
+            arr = self.inv_p[trid]
+            start_cut = core.UTCDateTime(arr - timedelta(seconds=pre_arr_p))
+            end_cut = core.UTCDateTime(arr + timedelta(seconds=(after_arr-1)))
+            write_trace = trace.trim(start_cut, end_cut)
+            stat_header = station_header(trace, pre_arr_p, pre_arr_s,
+                                         after_arr)
+            inv_id.write(stat_header)
+
+            # Set response for wwlpbn
+            # May want to change this later
+            newpaz = {'poles': [-0.257 + 0.3376j, -0.257 - 0.3376j,
+                                -0.06283 + 0.0j, -0.06283 + 0.0j],
+                      'zeros': [0.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
+                      'gain': 0.5985275}
+
+            # Line with numbers of poles and zeros and gain
+            pz_line1 = '{:4d}{:4d} {}\r\n'.format(len(newpaz['zeros']),
+                                                  len(newpaz['poles']),
+                                                  inv_float(newpaz['gain']))
+            inv_id.write(pz_line1)
+            # Line of zeros:
+            pz_line2 = ""
+            for zero in list(newpaz['zeros']):
+                pz_line2 += ' {}'.format(inv_float(zero.real))
+                pz_line2 += ' {}'.format(inv_float(zero.imag))
+            pz_line2 += '\r\n'
+            inv_id.write(pz_line2)
+            # line of poles
+            pz_line3 = ""
+            for pole in list(newpaz['poles']):
+                pz_line3 += ' {}'.format(inv_float(pole.real))
+                pz_line3 += ' {}'.format(inv_float(pole.imag))
+            pz_line3 += '\r\n'
+            inv_id.write(pz_line3)
+
+            # Loop through trace data, writing to file
+            for i in range(0, len(write_trace.data), 8):
+                line = trace.data[i:(i+8)]
+                line_inv = [inv_float(x * 1.e6) for x in line]
+                line_str = ' {}' * len(line) + '\r\n'
+                line_out = line_str.format(*line_inv)
+                inv_id.write(line_out)
+
+        # Close file
+        inv_id.close()
         return
-
-
-# To run as a script without running a python interpreter first
-# if __name__ == "__main__":
-#     import sys
-#
-#     ARGS = sys.argv[:]
-#     if len(ARGS) != 12:
-#         raise IOError("Wrong number of arguments: 11 arguments"
-#                       " (tar_archive, year, month, day, hour,"
-#                       "minute, second, evla, evlo, depth, mag)"
-#                       " should be specified!")
-#
-#     else:
-#         TAR_ARCH = ARGS[1]
-#         YR, MONTHS, DAYS, HOURS, MINUTES, SECONDS = list(map(int, ARGS[2:8]))
-#         EVLON, EVLAT, EVDEPTH, MAGNITUDE = list(map(float, ARGS[8:]))
-#         unpack_eq(TAR_ARCH, YR, MONTHS, DAYS, HOURS, MINUTES, SECONDS, EVLON,
-#                   EVLAT, EVDEPTH, MAGNITUDE, rot_tol=5.)
