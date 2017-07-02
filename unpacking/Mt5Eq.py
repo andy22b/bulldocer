@@ -1,5 +1,5 @@
 """
-Module to facilitate unpacking data for use in MT5.
+Module to facilitate unpacking of IRIS data for use in MT5.
 """
 ###############################################################################
 # Import modules
@@ -139,22 +139,6 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
                                n_data, ymax, delta_t, arr_secs, hpfilt)
 
     return header
-
-
-# def station_polezeros(trace):
-#     """
-#     Helper function to write pole zeros in .inv format.
-#     Checks whether trace has a pz file attachmentotherwise defaults to WWLPBN
-#     :param trace:
-#     :return:
-#     """
-#     if hasattr(trace.stats, 'paz'):
-#         paz = trace.stats.paz
-#         assert all([key in paz.keys() for key in ['poles', 'zeros']])
-#         poles = paz['poles']
-#         zeros = paz['zeros']
-#     else:
-#         print
 
 
 def inv_float(number: float) -> str:
@@ -864,11 +848,11 @@ class Mt5Eq:
         header_lat_str = ('{:2d}'.format(int(header_lat_round)) +
                           str(header_lat_round).split('.')[-1][:2])
 
-        file_head_str = '{} {}  {}{:3d} 0  0\r\n'.format(header_date,
-                                                         header_lat_str,
-                                                         header_lon_str,
-                                                         int(round(self.depth)))
-        inv_id.write(file_head_str)
+        f_head_str = '{} {}  {}{:3d} 0  0\r\n'.format(header_date,
+                                                      header_lat_str,
+                                                      header_lon_str,
+                                                      int(round(self.depth)))
+        inv_id.write(f_head_str)
         # Create dictionary of traces in inv_stream
         inv_dic = {trace.id: trace for trace in self.inv_stream}
 
