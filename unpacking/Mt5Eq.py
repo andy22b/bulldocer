@@ -105,7 +105,7 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
     else:
         # S not always second arrival
         for key in trace.stats.sac:
-            if 'kt' in trace and 'S' in trace.stats.sac[key]:
+            if 'kt' in key and 'S' in trace.stats.sac[key]:
                 arrival = trace.stats.sac[key[1:]]
                 seis_start = round(arrival - pre_arrival_s)
     # Check that arrival has been read
@@ -867,7 +867,7 @@ class Mt5Eq:
         return
 
     def write_inv(self, inv_name=None, pre_arr_p=15., pre_arr_s=20.,
-                  after_arr=85.):
+                  aft_arr=85.):
         """
         Function to read in sac files and format those from selected stations
         into a .INV format (that MT5 can read).
@@ -875,7 +875,7 @@ class Mt5Eq:
         :param inv_name: Non-standard (YYMMDD) name for .inv file
         :param pre_arr_p
         :param pre_arr_s
-        :param after_arr
+        :param aft_arr
         :return:
         """
         # Turn date-time info into name of file
@@ -909,53 +909,59 @@ class Mt5Eq:
         # Create dictionary of traces in inv_stream
         inv_dic = {trace.id: trace for trace in self.inv_stream}
 
-        # Loop through P stations, writing to file
-        # Write header line with station info
-        for trid in list(self.inv_p.keys()):
-            trace = inv_dic[trid]
-            # Cut trace to correct length
-            arr = self.inv_p[trid]
-            start_cut = core.UTCDateTime(arr - timedelta(seconds=pre_arr_p))
-            end_cut = core.UTCDateTime(arr + timedelta(seconds=(after_arr-1)))
-            write_trace = trace.trim(start_cut, end_cut)
-            stat_header = station_header(trace, pre_arr_p, pre_arr_s,
-                                         after_arr)
-            inv_id.write(stat_header)
+        # Loop through P and S stations, writing to file
+        for arr_type, arr_dic in (("P", self.inv_p), ("S", self.inv_s)):
+            for trid in list(arr_dic.keys()):
+                # Write header line with station info
+                trace = inv_dic[trid]
+                # Cut trace to correct length
+                arr = arr_dic[trid]
+                if arr_type == "P":
+                    pre_arr = pre_arr_p
+                else:
+                    pre_arr = pre_arr_s
+                start_cut = core.UTCDateTime(arr - timedelta(seconds=pre_arr))
+                seis_len = aft_arr - 1.
+                end_cut = core.UTCDateTime(arr + timedelta(seconds=seis_len))
+                write_trace = trace.trim(start_cut, end_cut)
+                stat_header = station_header(trace, pre_arr_p, pre_arr_s,
+                                             aft_arr)
+                inv_id.write(stat_header)
 
-            # Set response for wwlpbn
-            # May want to change this later
-            newpaz = {'poles': [-0.257 + 0.3376j, -0.257 - 0.3376j,
-                                -0.06283 + 0.0j, -0.06283 + 0.0j],
-                      'zeros': [0.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
-                      'gain': 0.5985275}
+                # Set response for wwlpbn
+                # May want to change this later
+                newpaz = {'poles': [-0.257 + 0.3376j, -0.257 - 0.3376j,
+                                    -0.06283 + 0.0j, -0.06283 + 0.0j],
+                          'zeros': [0.0 + 0.0j, 0.0 + 0.0j, 0.0 + 0.0j],
+                          'gain': 0.5985275}
 
-            # Line with numbers of poles and zeros and gain
-            pz_line1 = '{:4d}{:4d} {}\r\n'.format(len(newpaz['zeros']),
-                                                  len(newpaz['poles']),
-                                                  inv_float(newpaz['gain']))
-            inv_id.write(pz_line1)
-            # Line of zeros:
-            pz_line2 = ""
-            for zero in list(newpaz['zeros']):
-                pz_line2 += ' {}'.format(inv_float(zero.real))
-                pz_line2 += ' {}'.format(inv_float(zero.imag))
-            pz_line2 += '\r\n'
-            inv_id.write(pz_line2)
-            # line of poles
-            pz_line3 = ""
-            for pole in list(newpaz['poles']):
-                pz_line3 += ' {}'.format(inv_float(pole.real))
-                pz_line3 += ' {}'.format(inv_float(pole.imag))
-            pz_line3 += '\r\n'
-            inv_id.write(pz_line3)
+                # Line with numbers of poles and zeros and gain
+                pz_ln1 = '{:4d}{:4d} {}\r\n'.format(len(newpaz['zeros']),
+                                                    len(newpaz['poles']),
+                                                    inv_float(newpaz['gain']))
+                inv_id.write(pz_ln1)
+                # Line of zeros:
+                pz_line2 = ""
+                for zero in list(newpaz['zeros']):
+                    pz_line2 += ' {}'.format(inv_float(zero.real))
+                    pz_line2 += ' {}'.format(inv_float(zero.imag))
+                pz_line2 += '\r\n'
+                inv_id.write(pz_line2)
+                # line of poles
+                pz_line3 = ""
+                for pole in list(newpaz['poles']):
+                    pz_line3 += ' {}'.format(inv_float(pole.real))
+                    pz_line3 += ' {}'.format(inv_float(pole.imag))
+                pz_line3 += '\r\n'
+                inv_id.write(pz_line3)
 
-            # Loop through trace data, writing to file
-            for i in range(0, len(write_trace.data), 8):
-                line = trace.data[i:(i+8)]
-                line_inv = [inv_float(x * 1.e6) for x in line]
-                line_str = ' {}' * len(line) + '\r\n'
-                line_out = line_str.format(*line_inv)
-                inv_id.write(line_out)
+                # Loop through trace data, writing to file
+                for i in range(0, len(write_trace.data), 8):
+                    line = trace.data[i:(i+8)]
+                    line_inv = [inv_float(x * 1.e6) for x in line]
+                    line_str = ' {}' * len(line) + '\r\n'
+                    line_out = line_str.format(*line_inv)
+                    inv_id.write(line_out)
 
         # Close file
         inv_id.close()
