@@ -1,5 +1,5 @@
 """
-Module to facilitate unpacking of IRIS data for use in MT5.
+Module to do the unpacking of IRIS data for use in MT5.
 """
 ###############################################################################
 # Import modules
@@ -23,7 +23,7 @@ from obspy.taup import TauPyModel
 def get_otherid(trace):
     """
     Function to find corresponding seismogram in E,N pair.
-    Takes trace as argument, returns obspy format id.
+    Takes trace (object) as argument, returns obspy format id.
     """
     network, station, location, channel = getstats(trace)
     if any(x in channel for x in ['E', '2', 'N', '1']):
@@ -60,12 +60,12 @@ def getstats(trace: object):
 
 def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
     """
-    
-    :param trace:
-    :param pre_arrival_p:
-    :param pre_arrival_s:
-    :param after_arrival:
-    :return: 
+    Helper function to write headers for each station in .INV file
+    :param trace: Obspy trace object
+    :param pre_arrival_p: Length of time in seismogram before P arrival
+    :param pre_arrival_s: Length of time in seismogram before S arrival
+    :param after_arrival: Length of seismogram after arrival to include
+    :return:
     """
     # Station name, lower case
     sname = trace.stats.station.lower()
@@ -80,8 +80,8 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
         channel_num = 2
 
     # Check that channel is broadband
-    bb = trace.stats.channel[0]
-    if bb is not 'B':
+    bb_test = trace.stats.channel[0]
+    if bb_test is not 'B':
         print("Channel for station is not broadband: may cause problems...")
     bb_phase = 4
 
@@ -143,7 +143,7 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
 
 def inv_float(number: float) -> str:
     """
-    To turn number into format required by .inv file
+    To turn number into format required by .inv file, and MT5 in general
     :param number: Float
     :return: string representation of number in .inv style
     """
@@ -176,10 +176,13 @@ def inv_float(number: float) -> str:
 
 
 class Mt5Eq:
+    """
+    Class to use as base for unpacking MT5 data and converting to .INV
+    """
     def __init__(self, name=None, verbose=True):
         """
-        Class to use as base for unpacking MT5 data and converting to .INV
-        :param name: Name of earthquake to avoid confusion
+        :param name: Name of earthquake to avoid confusion.
+        :param verbose: How much information to print; currently under-used.
         """
         # Initialize class
         super(Mt5Eq, self).__init__()
@@ -188,7 +191,7 @@ class Mt5Eq:
         self.verbose = verbose
         if self.verbose:
             if name:
-                assert type(name) is str, 'Name must be string'
+                assert isinstance(name, str), 'Name must be string'
                 self.name = name
                 print("Initializing earthquake class '{}'".format(name))
             else:
@@ -221,18 +224,22 @@ class Mt5Eq:
                             evla, evlo, depth, mag):
         """
         Function to set important attributes of earthquake
-        :param year: 
-        :param month: 
-        :param day: 
-        :param hour: 
-        :param minute: 
-        :param second: 
-        :param evla: 
-        :param evlo: 
-        :param depth: 
-        :param mag: 
-        :return: 
+        Might be worth using exception handling so that errors related to
+        accidental zero padding are more obvious.
+        :param year: Int, yyyy format
+        :param month: Int, no padded zeros
+        :param day: int, no padded zeros
+        :param hour: int, no padded zeros
+        :param minute: int, no padded zeros
+        :param second: int or float, no padded zeros
+        :param evla: int or float, no padded zeros
+        :param evlo: int or float, no padded zeros
+        :param depth: int or float, no padded zeros
+        :param mag: int or float, no padded zeros
+        :return:
         """
+        for arg in [year, month, day, hour, minute]:
+            assert isinstance(arg, int), 'Variable must be integer'
         for arg in [second, evla, evlo, depth, mag]:
             assert isinstance(arg, (float, int)), 'Variable must be float/ int'
 
@@ -249,19 +256,22 @@ class Mt5Eq:
     def write_eq_info(self, fname=None):
         """
         Function to write out a file in the format ${evname}.txt, since this is
-        still used in the later parts of readme-BRIAN. Will attempt to phase 
+        still used in the later parts of readme-BRIAN. Will attempt to phase
         out as soon as possible.
         """
+        # String format for date and time
         txt_dt = self.evdt.strftime('%Y (%j)  %m %d %H %M %S.0')
         str_list = list(map(str, [self.evla, self.evlo, self.depth,
                                   self.mag, self.yyyyjjjhhmmss]))
         txt_line = txt_dt + '   {}    {}   {}  {} {}'.format(*str_list)
+        # Generate filename (if not given)
         if fname:
-            assert type(fname) is str, 'File name must be string'
+            assert isinstance(fname, str), 'File name must be string'
             outfilename = fname
         else:
             outfilename = '{}/{}.txt'.format(self.yyyyjjjhhmmss,
                                              self.yyyyjjjhhmmss)
+        # Write file
         outfileid = open(outfilename, 'w')
         outfileid.write(
             '          Origin time           Lat      Lon     Dp  Mag')
@@ -276,7 +286,6 @@ class Mt5Eq:
         """
         Script to unpack data from zipped tar archive, altermative to first par
         t of README-Brian
-    
         Arguments:
         tar_archive		String containing name of .tgz file downloaded from sac
         year		Event year in yyyy format (integer)
@@ -300,8 +309,35 @@ class Mt5Eq:
         # Extract tgz archive
         #######################################################################
 
-        # If yyyyjjjhhmmss already exists as directory, remove it
+        # If yyyyjjjhhmmss already exists as directory, ask and remove it
         if os.path.exists(self.yyyyjjjhhmmss):
+            print("An unpacked folder for this earthquake already exists."
+                  " Are you sure you want to replace it?")
+            while True:
+                yorn = input('Enter y or n:')
+                if yorn.lower() not in ("y", "n"):
+                    print('Try again (enter y or n):')
+                    continue
+                if yorn.lower() == 'n':
+                    raise Exception('Exiting function to avoid overwriting...')
+                else:
+                    break
+
+            print("Overwriting soon. There may be arrival files in the folder"
+                  " Are you sure you want to remove these?"
+                  " Enter 'y' if yes, or if you have saved copies elsewhere."
+                  " Enter 'n' if you wish to exit the function")
+            while True:
+                yorn = input('Enter y or n:')
+                if yorn.lower() not in ("y", "n"):
+                    print('Try again (enter y or n):')
+                    continue
+                elif yorn.lower() == 'n':
+                    raise Exception(
+                        'Exiting function to avoid overwriting...')
+                else:
+                    break
+
             shutil.rmtree(self.yyyyjjjhhmmss)
         # Extract tar archive (transparent compression)
         tf_id = tarfile.open(tar_archive, 'r:*')
@@ -341,11 +377,13 @@ class Mt5Eq:
                                                           stla, stlo)
                 # dist is in metres; change to degrees
                 gcarc = kilometer2degrees(dist / 1000.)
+                # assign to dictionary
                 statdic['gcarc'] = gcarc
                 statdic['az'] = azimuth
                 statdic['baz'] = back_az
 
         # Change trace metadata for all traces
+        # Not ideal, but I can't see a better way
         for trace in stream:
             station = trace.stats.station
             statdic = stations_dic[station]
@@ -642,10 +680,12 @@ class Mt5Eq:
 
     def get_pands_arrivals(self):
         """
-        :return: 
+        Function to extract P arrivals from SAC hearder parts of invstream
+        :return:
         """
-        # Check that
+        # Check that I have already unpacked data
         assert self.inv_stream, 'Need to unpack or load data'
+        # Check whether arrivals have already been calculated
         if any((self.p_arr, self.s_arr)):
             print('P and S arrivals exist:'
                   'are you sure you want to replace them?')
@@ -679,6 +719,10 @@ class Mt5Eq:
         return
 
     def sort_ps_by_az(self):
+        """
+        Creates dictionaries
+        :return:
+        """
         assert self.inv_stream, 'Unpack data first.'
         assert all((self.p_arr, self.s_arr)), 'Calculate P and S arrivals!'
         # Make dictionaries to contain containing azimuth and stations
@@ -698,12 +742,12 @@ class Mt5Eq:
 
     def write_pands(self, pname=None, sname=None, organisation='azimuthal'):
         """
-        Function to write files with possible stations that could be included 
+        Function to write files with possible stations that could be included
         in the .INV file, with predicted P and S arrival times.
-        :param pname: 
-        :param sname:
-        :param organisation
-        :return: 
+        :param pname: file to write P stations and arrivals to.
+        :param sname: file to write S stations and arrivals to.
+        :param organisation: Write stations azimuthally or alphabetically
+        :return:
         """
         # Check that MT5 object has all the right variables set
         assert self.yyyyjjjhhmmss, 'Need to read in earthquake info...'
@@ -760,12 +804,17 @@ class Mt5Eq:
         s_arr_id.close()
         return
 
-    def read_pands(self, p_file_name, s_file_name):
+    def read_pands(self, p_file_path, s_file_path, limit_number=25):
         """
-        :param p_file_name: 
-        :param s_file_name:
-        :return: 
+        Opposite of previous function reads in files again (usually altered).
+        Edit files to choose stations for inversion.
+        :param p_file_path: Path to file containing chosen P stations
+        :param s_file_path: Path to file containing chosen S stations
+        :param limit_number: Limits P and S seismograms to 25 each.
+        :return:
         """
+        # Check that limit_number is a positive integer
+        assert all((isinstance(limit_number, int), limit_number >= 0))
         # Check whether .inv arrivals exist, and whether to overwrite them.
         if any((self.inv_s, self.inv_p)):
             print("P and S arrivals for inversion already exist:"
@@ -786,18 +835,23 @@ class Mt5Eq:
         if self.verbose:
             print('Reading data from files...')
         # Open files, check format
-        p_file_id = open(p_file_name, 'r')
+        p_file_id = open(p_file_path, 'r')
         p_data = p_file_id.readlines()
         p_file_id.close()
 
-        s_file_id = open(s_file_name, 'r')
+        s_file_id = open(s_file_path, 'r')
         s_data = s_file_id.readlines()
         s_file_id.close()
+
+        limit_string = 'Too many {} seismograms ({:d}). Cutting at {:d}.'
+        for arrtype, data in [('P', p_data), ('S', s_data)]:
+            if len(data) > limit_number:
+                print(limit_string.format(arrtype, len(data), limit_number))
 
         # List of file, dictionary pairs to use
         read_list = [(p_data, self.inv_p), (s_data, self.inv_s)]
         for data, arrival in read_list:
-            for line in data:
+            for line in data[:limit_number]:
                 lsplit = line.split()
                 assert len(lsplit) == 2, 'Line too long{}'.format(line.strip())
                 try:
@@ -815,15 +869,14 @@ class Mt5Eq:
     def write_inv(self, inv_name=None, pre_arr_p=15., pre_arr_s=20.,
                   after_arr=85.):
         """
-        Function to read in sac files and format those from selected stations 
+        Function to read in sac files and format those from selected stations
         into a .INV format (that MT5 can read).
-         
         Requires newlines to be specified by \r\n for reading into DOS.
         :param inv_name: Non-standard (YYMMDD) name for .inv file
         :param pre_arr_p
         :param pre_arr_s
         :param after_arr
-        :return: 
+        :return:
         """
         # Turn date-time info into name of file
         evdt = self.evdt
