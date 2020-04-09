@@ -7,13 +7,14 @@ from numpy import arcsin, cos, tan, array, amin, zeros
 
 def psvcoef(rp, alph1, beta1, rho1, alph2, beta2, rho2):
     """
+    Function to calculate
     :param rp: Ray parameter
     :param alph1: P velocity in uppermost layer
     :param beta1: S velocity in uppermost layer
-    :param rho1:
-    :param alph2:
-    :param beta2:
-    :param rho2:
+    :param rho1: Density in uppermost layer
+    :param alph2: P velocity in lower layer
+    :param beta2: S velocity in lower layer
+    :param rho2: Density sin lower layer
     :return:
     """
 
@@ -127,9 +128,22 @@ def water(rp, alphw, wthk, pdpu, r0, timax, nraymax):
 def m5cresp(sthk, p, vp, vs, rho, vpu, vsu, rhou, vpd, vsd, rhod, nrev,
             nraymax):
     """
-    -- calculate complete P-SV response of a single layer for NREV bounces
-    """
-    # Matrix of coefficients
+    P velocity in uppermost layer
+    :param sthk: Thickness of layer (UNITS).
+    :param p: Ray parameter
+    :param vp: Layer vp
+    :param vs: Layer vs
+    :param rho: Layer density
+    :param vpu: Layer above vp
+    :param vsu: Layer above vs
+    :param rhou: Layer 
+    :param vpd: 
+    :param vsd: 
+    :param rhod: 
+    :param nrev: 
+    :param nraymax: 
+    :return: 
+    """    # Matrix of coefficients
     a = zeros((2, 4))
     ampout = zeros((2, 4))
     timout = zeros((nraymax,))

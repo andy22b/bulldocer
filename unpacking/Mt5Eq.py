@@ -10,6 +10,7 @@ import os
 import shutil
 import tarfile
 from datetime import datetime, timedelta
+import numpy as np
 
 # Seismology-related
 from obspy import core
@@ -126,6 +127,7 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
     n_data = int(round(phase_time + after_arrival / delta_t))
 
     # Max amplitude of trace (converted from SI to microns)
+    # ymax = int(np.round(np.nanmax(np.abs(trace.data * 1.e6))))
     ymax = int(round(max(abs(trace.data * 1.e6))))
 
     # High-pass filtering is alwats zero (for now)
@@ -284,7 +286,7 @@ class Mt5Eq:
     def unpack_eq(self, tar_archive, rot_tol=5.,
                   before_cut=30., after_cut=90.):
         """
-        Script to unpack data from zipped tar archive, altermative to first par
+        Script to unpack data from zipped tar archive, alternative to first par
         t of README-Brian
         Arguments:
         tar_archive		String containing name of .tgz file downloaded from sac
@@ -300,7 +302,7 @@ class Mt5Eq:
         mag			float
         """
         # Make datetime object from input arguments
-        print(("Datetime in yyyyjjjhhmmss format = ", self.yyyyjjjhhmmss))
+        print("Datetime in yyyyjjjhhmmss format = {}".format(self.yyyyjjjhhmmss))
 
         # Change to utc datetime (for cutting)
         evdt = self.evdt
@@ -471,7 +473,7 @@ class Mt5Eq:
         # Empty dictionary for trace ids and corresponding PZ files
         pz_ids = {}
         # List of PZ files
-        pz_ls = glob.glob(self.yyyyjjjhhmmss + '/SACPZ*')
+        pz_ls = glob.glob(self.yyyyjjjhhmmss + '/*/SACPZ*.*')
         # Search for trace corresponding to each PZ file
         for pole_zero in pz_ls:
             pz_split = pole_zero.split('.')
@@ -725,7 +727,7 @@ class Mt5Eq:
         """
         assert self.inv_stream, 'Unpack data first.'
         assert all((self.p_arr, self.s_arr)), 'Calculate P and S arrivals!'
-        # Make dictionaries to contain containing azimuth and stations
+        # Make dictionaries containing azimuth and stations
         self.p_azi = {}
         self.s_azi = {}
         # Fill dictionaries by looping through inv_stream:
@@ -733,11 +735,17 @@ class Mt5Eq:
             # Find whether vertical or horizontal channel
             channel = trace.stats.channel[-1]
             if channel == 'Z':
-                self.p_azi[trace.stats.sac['az']] = (trace.id,
-                                                     self.p_arr[trace.id])
+                az = trace.stats.sac['az']
+                lat = trace.stats.sac['stla']
+                lon = trace.stats.sac['stlo']
+                short_name = str(trace.stats.sac['kstnm']).strip()
+                self.p_azi[az] = (trace.id, self.p_arr[trace.id], lon, lat, az, short_name)
             elif channel == 'T':
-                self.s_azi[trace.stats.sac['az']] = (trace.id,
-                                                     self.s_arr[trace.id])
+                az = trace.stats.sac['az']
+                lat = trace.stats.sac['stla']
+                lon = trace.stats.sac['stlo']
+                short_name = str(trace.stats.sac['kstnm']).strip()
+                self.s_azi[az] = (trace.id, self.s_arr[trace.id], lon, lat, az, short_name)
         return
 
     def write_pands(self, pname=None, sname=None, organisation='azimuthal'):
@@ -924,9 +932,14 @@ class Mt5Eq:
                 seis_len = aft_arr - 1.
                 end_cut = core.UTCDateTime(arr + timedelta(seconds=seis_len))
                 write_trace = trace.trim(start_cut, end_cut)
-                stat_header = station_header(trace, pre_arr_p, pre_arr_s,
-                                             aft_arr)
-                inv_id.write(stat_header)
+                try:
+                    stat_header = station_header(trace, pre_arr_p, pre_arr_s,
+                                                 aft_arr)
+                    inv_id.write(stat_header)
+                except:
+                    print("Problem writing {}".format(trid))
+                    print("Choose another station?")
+                    continue
 
                 # Set response for wwlpbn
                 # May want to change this later
@@ -966,3 +979,23 @@ class Mt5Eq:
         # Close file
         inv_id.close()
         return
+
+    def write_station_map(self, prefix: str = None):
+        if prefix is not None:
+            p_file = prefix + "_p_station_locs.txt"
+            s_file = prefix + "_s_station_locs.txt"
+        else:
+            p_file = "p_station_locs.txt"
+            s_file = "s_station_locs.txt"
+
+        p_out = '{}/{}_{}'.format(self.yyyyjjjhhmmss, self.yyyyjjjhhmmss, p_file)
+        s_out = '{}/{}_{}'.format(self.yyyyjjjhhmmss, self.yyyyjjjhhmmss, s_file)
+
+        for fname, dictionary in zip((p_out, s_out), (self.p_azi, self.s_azi)):
+            out_id = open(fname, "w")
+            for key in sorted(self.p_azi.keys()):
+                station_info = self.p_azi[key][2:]
+                out_id.write('{:.4f} {:.4f} {:.4f} {}\n'.format(*station_info))
+
+
+
