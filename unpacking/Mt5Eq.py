@@ -75,14 +75,14 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
     # Phase from channel:
     channel = trace.stats.channel[-1]
     assert channel in ['Z', 'T'], "Channel must be vertical or transverse!"
-    if channel is 'Z':
+    if channel == 'Z':
         channel_num = 1
     else:
         channel_num = 2
 
     # Check that channel is broadband
     bb_test = trace.stats.channel[0]
-    if bb_test is not 'B':
+    if bb_test != 'B':
         print("Channel for station is not broadband: may cause problems...")
     bb_phase = 4
 
@@ -699,7 +699,7 @@ class Mt5Eq:
                 else:
                     break
 
-            if yorn is 'n':
+            if yorn == 'n':
                 raise Exception('Exiting function to avoid overwriting...')
 
         # Create blank dictionaries to hold arrival times for each trace
@@ -812,7 +812,7 @@ class Mt5Eq:
         s_arr_id.close()
         return
 
-    def read_pands(self, p_file_path, s_file_path, limit_number=25):
+    def read_pands(self, p_file_path, s_file_path, limit_number=25, overall_limit: int = 50):
         """
         Opposite of previous function reads in files again (usually altered).
         Edit files to choose stations for inversion.
@@ -851,15 +851,30 @@ class Mt5Eq:
         s_data = s_file_id.readlines()
         s_file_id.close()
 
-        limit_string = 'Too many {} seismograms ({:d}). Cutting at {:d}.'
-        for arrtype, data in [('P', p_data), ('S', s_data)]:
-            if len(data) > limit_number:
-                print(limit_string.format(arrtype, len(data), limit_number))
+        if (len(p_data) + len(s_data)) > overall_limit:
+            limit_string = 'Too many {} seismograms ({:d}). Cutting at {:d}.'
+            limits = []
+            for arrtype, data, other_data in [('P', p_data, s_data), ('S', s_data, p_data)]:
+                if all([len(a) > limit_number for a in [p_data, s_data]]):
+                    print(limit_string.format(arrtype, len(data), limit_number))
+                    limits = [limit_number, limit_number]
+                else:
+                    if len(data) > limit_number:
+                        limits.append(overall_limit - len(other_data))
+                        print(limit_string.format(arrtype, len(data), overall_limit - len(other_data)))
+                    else:
+                        limits.append(len(data))
+
+        else:
+            limits = [len(p_data), len(s_data)]
+
+        assert len(limits) == 2
+        p_limit, s_limit = limits
 
         # List of file, dictionary pairs to use
-        read_list = [(p_data, self.inv_p), (s_data, self.inv_s)]
-        for data, arrival in read_list:
-            for line in data[:limit_number]:
+        read_list = [(p_data, self.inv_p, p_limit), (s_data, self.inv_s, s_limit)]
+        for data, arrival, limit in read_list:
+            for line in data[:limit]:
                 lsplit = line.split()
                 assert len(lsplit) == 2, 'Line too long{}'.format(line.strip())
                 try:
