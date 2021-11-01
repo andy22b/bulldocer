@@ -106,7 +106,7 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
     else:
         # S not always second arrival
         for key in trace.stats.sac:
-            if 'kt' in key and 'S' in trace.stats.sac[key]:
+            if 'kt' in key and trace.stats.sac[key]=="S":
                 arrival = trace.stats.sac[key[1:]]
                 seis_start = round(arrival - pre_arrival_s)
     # Check that arrival has been read
@@ -130,7 +130,7 @@ def station_header(trace, pre_arrival_p, pre_arrival_s, after_arrival):
     # ymax = int(np.round(np.nanmax(np.abs(trace.data * 1.e6))))
     ymax = int(round(max(abs(trace.data * 1.e6))))
 
-    # High-pass filtering is alwats zero (for now)
+    # High-pass filtering is always zero (for now)
     hpfilt = 0.
 
     header_str = ("{}{:1d} {:1d}" + 2 * "{:8.2f}" + "{:8d}{:8.2f}{:5.1f}" +
